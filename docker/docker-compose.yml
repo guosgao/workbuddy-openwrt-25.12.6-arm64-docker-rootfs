@@ -1,0 +1,27 @@
+# ============================================================
+# 在 ARM64 设备（如 ARM 软路由 / 树莓派 / ARM 云主机）上用 Docker 运行 OpenWrt
+# 前提：已导入镜像，见 README.md「Docker 部署」章节
+# 网络模式：macvlan（推荐，让 OpenWrt 获得独立的局域网 IP 192.168.1.2）
+# 使用前请按实际情况修改 parent 网卡名与网段
+# ============================================================
+services:
+  openwrt:
+    image: openwrt-25.12-arm64:latest
+    container_name: openwrt
+    restart: unless-stopped
+    privileged: true
+    command: /sbin/init
+    networks:
+      macnet:
+        ipv4_address: 192.168.1.2
+
+networks:
+  macnet:
+    driver: macvlan
+    driver_opts:
+      parent: eth0          # <-- 改成你的物理网卡名（用 ip link 查看）
+    ipam:
+      config:
+        - subnet: 192.168.1.0/24
+          gateway: 192.168.1.1
+          ip_range: 192.168.1.2/32

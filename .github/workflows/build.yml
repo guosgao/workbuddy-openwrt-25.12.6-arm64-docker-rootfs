@@ -1,0 +1,165 @@
+name: Build OpenWrt 25.12 ARM64 (Docker rootfs.tar.gz)
+
+# 手动触发编译；可选是否上传为 Release
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: '编译完成后是否创建 Release 并上传固件'
+        required: false
+        default: 'true'
+        type: choice
+        options: ['true', 'false']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      # ---------- 1. 检出本仓库（含 config/ scripts/ files/） ----------
+      - name: Checkout build repo
+        uses: actions/checkout@v4
+
+      # ---------- 2. 安装编译依赖 ----------
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get full-upgrade -y
+          sudo apt-get install -y \
+            ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext \
+            gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
+            libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
+            mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 \
+            python3-pyelftools libpython3-dev qemu-utils rsync scons squashfs-tools \
+            subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+
+      # ---------- 3. 缓存（加速二次编译）----------
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.ccache
+          key: ${{ runner.os }}-openwrt-25.12-arm64-ccache-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-openwrt-25.12-arm64-ccache-
+
+      - name: Cache downloads
+        uses: actions/cache@v4
+        with:
+          path: openwrt/dl
+          key: ${{ runner.os }}-openwrt-25.12-arm64-dl-${{ hashFiles('config/config.seed') }}
+          restore-keys: |
+            ${{ runner.os }}-openwrt-25.12-arm64-dl-
+
+      # ---------- 4. 克隆 OpenWrt 25.12 稳定版源码 ----------
+      - name: Clone OpenWrt 25.12 source
+        run: |
+          git clone --depth 1 --branch v25.12.6 https://github.com/openwrt/openwrt.git openwrt
+          cd openwrt
+          echo "OPENWRT_TAG=v25.12.6" >> $GITHUB_ENV
+
+      # ---------- 5. 注入软件源配置 ----------
+      - name: Setup feeds config
+        run: |
+          cp -f config/feeds.conf.default openwrt/feeds.conf.default
+          echo "[setup] feeds.conf.default 已替换"
+          cat openwrt/feeds.conf.default
+
+      # ---------- 6. 注入默认配置覆盖层（IP/网关/密码/主题）----------
+      - name: Setup default files overlay
+        run: |
+          mkdir -p openwrt/files
+          cp -rf files/. openwrt/files/
+          chmod +x openwrt/files/etc/uci-defaults/* 2>/dev/null || true
+          echo "[setup] 默认配置覆盖层已复制"
+          find openwrt/files -type f | sort
+
+      # ---------- 7. 执行 diy-part1（feeds 更新前：注入 Turbo ACC）----------
+      - name: DIY part1 (before feeds update)
+        working-directory: openwrt
+        run: bash ../scripts/diy-part1.sh
+
+      # ---------- 8. 更新并安装 feeds ----------
+      - name: Update and install feeds
+        working-directory: openwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      # ---------- 9. 执行 diy-part2（feeds 安装后：注入 filetransfer）----------
+      - name: DIY part2 (after feeds install)
+        working-directory: openwrt
+        run: bash ../scripts/diy-part2.sh
+
+      # ---------- 10. 写入编译配置 ----------
+      - name: Apply .config
+        working-directory: openwrt
+        run: |
+          cp ../config/config.seed .config
+          make defconfig
+          echo "[config] 关键配置项校验："
+          grep -E 'CONFIG_TARGET_armsr_armv8_generic|CONFIG_PACKAGE_luci-app-(openclash|adguardhome|turboacc|upnp|ttyd|mwan3|diskman|filetransfer)|CONFIG_PACKAGE_luci-theme-argon' .config || true
+
+      # ---------- 11. 下载依赖源码 ----------
+      - name: Download package sources
+        working-directory: openwrt
+        run: |
+          make download -j8 || make download -j1 V=s
+
+      # ---------- 12. 编译（失败时用单线程详细日志重试）----------
+      - name: Compile firmware
+        working-directory: openwrt
+        run: |
+          make -j$(nproc) || make -j1 V=s
+
+      # ---------- 13. 收集 rootfs.tar.gz ----------
+      - name: Collect rootfs artifact
+        id: collect
+        run: |
+          mkdir -p artifacts
+          FILE=$(find openwrt/bin/targets/armsr/armv8 -maxdepth 1 -name '*rootfs.tar.gz' | head -n1)
+          if [ -z "$FILE" ]; then
+            echo "[ERROR] 未找到 rootfs.tar.gz，编译可能失败"
+            find openwrt/bin/targets/armsr/armv8 -maxdepth 1 -type f | sort || true
+            exit 1
+          fi
+          cp "$FILE" "artifacts/OpenWrt-25.12.6-arm64-Docker-rootfs.tar.gz"
+          cd artifacts
+          sha256sum OpenWrt-25.12.6-arm64-Docker-rootfs.tar.gz > sha256sum.txt
+          ls -lh
+          echo "dir=artifacts" >> $GITHUB_OUTPUT
+
+      # ---------- 14. 上传 Actions 产物 ----------
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWrt-25.12.6-arm64-Docker-rootfs
+          path: artifacts/*
+          retention-days: 30
+
+      # ---------- 15. 创建 Release 并上传固件 ----------
+      - name: Publish Release
+        if: ${{ inputs.release == 'true' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: openwrt-25.12.6-arm64-${{ github.run_number }}
+          name: OpenWrt 25.12.6 ARM64 (Docker)
+          body: |
+            ## OpenWrt 25.12.6 ARM64 Docker rootfs
+
+            - 目标平台：armsr/armv8 (ARM64)
+            - 固件格式：rootfs.tar.gz（Docker import 用）
+            - 默认 IPv4：192.168.1.2 / 网关 192.168.1.1
+            - 账号：root  密码：password
+
+            详见仓库 README.md。校验文件见 sha256sum.txt。
+          files: |
+            artifacts/*.tar.gz
+            artifacts/sha256sum.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

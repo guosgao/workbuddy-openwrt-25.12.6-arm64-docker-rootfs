@@ -1,0 +1,21 @@
+#!/bin/sh
+# 首次启动设置：Argon 主题 + 简体中文 + 时区
+# uci-defaults 只在首次启动时执行一次，之后自动删除
+
+# 主题与语言
+uci -q set luci.main.lang='zh_cn'
+uci -q set luci.main.mediaurlbase='/luci-static/argon'
+uci -q commit luci
+
+# 时区设为中国标准时间
+uci -q set system.@system[0].zonename='Asia/Shanghai'
+uci -q set system.@system[0].timezone='CST-8'
+uci -q commit system
+
+# 主机名
+uci -q set system.@system[0].hostname='OpenWrt'
+
+# 允许 uhttpd 监听（Docker 场景）
+/etc/init.d/uhttpd enable >/dev/null 2>&1
+
+exit 0
