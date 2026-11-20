@@ -84,11 +84,35 @@ jobs:
         working-directory: openwrt
         run: bash ../scripts/diy-part1.sh
 
-      # ---------- 8. 更新并安装 feeds ----------
-      - name: Update and install feeds
+      # ---------- 8. 更新 feeds（拆分：逐个更新，禁用 \r 进度覆盖，失败即定位）----------
+      - name: Update feeds
         working-directory: openwrt
         run: |
-          ./scripts/feeds update -a
+          export IS_TTY=0
+          echo "[feeds] 逐个更新软件源（IS_TTY=0 关闭进度覆盖，便于定位失败源）"
+          # 注意：原写法 `feeds update -a` 会把所有源的错误累加到最后才返回 1，
+          # 进度输出又用 \r 覆盖，导致日志只看得到 "Collecting ... done" 却看不到真正的错误。
+          for feed in packages luci routing telephony kenzo small; do
+            ok=0
+            for try in 1 2 3; do
+              echo "===== [feeds] update -f $feed（第 $try/3 次）====="
+              if ./scripts/feeds update -f "$feed"; then ok=1; break; fi
+              echo "[WARN] 软件源 $feed 更新失败，5 秒后重试 ..."
+              sleep 5
+            done
+            if [ "$ok" -ne 1 ]; then
+              echo "[ERROR] 软件源 $feed 连续 3 次更新失败（多为网络抖动 / Git 仓过大），请检查上方日志"
+              echo "[提示] 这类失败通常是临时的，直接重新 Run workflow 一般可解决（详见 README「常见问题」）"
+              exit 1
+            fi
+          done
+          echo "[feeds] 全部软件源更新成功"
+
+      # ---------- 9. 安装 feeds ----------
+      - name: Install feeds
+        working-directory: openwrt
+        run: |
+          export IS_TTY=0
           ./scripts/feeds install -a
 
       # ---------- 9. 执行 diy-part2（feeds 安装后：注入 filetransfer）----------
@@ -100,10 +124,15 @@ jobs:
       - name: Apply .config
         working-directory: openwrt
         run: |
+          export IS_TTY=0
           cp ../config/config.seed .config
-          make defconfig
+          make defconfig V=s
           echo "[config] 关键配置项校验："
           grep -E 'CONFIG_TARGET_armsr_armv8_generic|CONFIG_PACKAGE_luci-app-(openclash|adguardhome|turboacc|upnp|ttyd|mwan3|diskman|filetransfer)|CONFIG_PACKAGE_luci-theme-argon' .config || true
+          echo "[config] 以下配置项未生效（源中不存在或依赖不满足），请核对："
+          for sym in luci-app-openclash luci-app-adguardhome luci-app-turboacc luci-app-diskman luci-app-autoreboot luci-app-filetransfer luci-theme-argon luci-app-mwan3; do
+            grep -q "CONFIG_PACKAGE_${sym}=y" .config || echo "  - 缺失: $sym"
+          done
 
       # ---------- 11. 下载依赖源码 ----------
       - name: Download package sources
@@ -116,6 +145,27 @@ jobs:
         working-directory: openwrt
         run: |
           make -j$(nproc) || make -j1 V=s
+
+      # ---------- 失败诊断：打印扫描器重定向到文件、日志里看不到的真实错误 ----------
+      - name: Diagnose failure
+        if: failure()
+        working-directory: openwrt
+        run: |
+          echo "==================== 失败诊断开始 ===================="
+          echo "----- [1] 包/目标扫描的真实错误 (logs/**/dump.txt) -----"
+          if [ -d logs ]; then
+            find logs -type f -name 'dump.txt' | head -20 | while read -r f; do
+              echo "===== $f ====="
+              tail -40 "$f"
+            done
+          else
+            echo "(无 logs 目录，说明失败发生在扫描之前)"
+          fi
+          echo "----- [2] 软件源索引是否存在 -----"
+          ls -l feeds/*.index 2>/dev/null || echo "(无索引，feeds update 未完成)"
+          echo "----- [3] 关键配置是否生效 -----"
+          grep -E 'CONFIG_TARGET_armsr_armv8|CONFIG_PACKAGE_luci-app-(openclash|adguardhome|turboacc)' .config 2>/dev/null || echo "(.config 未生成)"
+          echo "==================== 失败诊断结束 ===================="
 
       # ---------- 13. 收集 rootfs.tar.gz ----------
       - name: Collect rootfs artifact
