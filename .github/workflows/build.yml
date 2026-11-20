@@ -22,7 +22,7 @@ jobs:
     steps:
       # ---------- 1. 检出本仓库（含 config/ scripts/ files/） ----------
       - name: Checkout build repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # ---------- 2. 安装编译依赖 ----------
       - name: Install build dependencies
@@ -41,7 +41,7 @@ jobs:
 
       # ---------- 3. 缓存（加速二次编译）----------
       - name: Cache ccache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /home/runner/.ccache
           key: ${{ runner.os }}-openwrt-25.12-arm64-ccache-${{ github.run_id }}
@@ -49,7 +49,7 @@ jobs:
             ${{ runner.os }}-openwrt-25.12-arm64-ccache-
 
       - name: Cache downloads
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: openwrt/dl
           key: ${{ runner.os }}-openwrt-25.12-arm64-dl-${{ hashFiles('config/config.seed') }}
@@ -136,7 +136,7 @@ jobs:
 
       # ---------- 14. 上传 Actions 产物 ----------
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: OpenWrt-25.12.6-arm64-Docker-rootfs
           path: artifacts/*
@@ -145,7 +145,7 @@ jobs:
       # ---------- 15. 创建 Release 并上传固件 ----------
       - name: Publish Release
         if: ${{ inputs.release == 'true' }}
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: openwrt-25.12.6-arm64-${{ github.run_number }}
           name: OpenWrt 25.12.6 ARM64 (Docker)
